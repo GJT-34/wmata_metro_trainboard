@@ -20,3 +20,7 @@ All notable changes to this project will be documented in this file.
 ## [2.0.0] - 2026-05-13
 
 - Completely revised code with new functionality
+
+## [2.1.0] - 2026-05-13
+
+- Added Metrobus functionality
