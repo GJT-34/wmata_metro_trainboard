@@ -528,7 +528,7 @@ while True:
             s_code = active_item.get('station_code')
             lines = "".join(target_cfg.get('lines', []))
             group_name = "".join([str(g) for g in target_cfg.get('groups', [])])
-            cache_key = f"{s_code}_{group_name}"
+            cache_key = f"{s_code}_{lines}_{group_name}"
             
             age = now - last_fetch_time_trains.get(cache_key, -100)
 
