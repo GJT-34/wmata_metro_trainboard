@@ -1,6 +1,6 @@
 # WMATA Metro Info Board
 
-This project contains the source code to create your own Washington Metropolitan Area Transit Authority (WMATA) Metro information board, showing both Metrorail and Metrobus information. It is written using CircuitPython targeting the [Adafruit Matrix Portal S3](https://www.adafruit.com/product/5778) and 64x32 RGB LED matrices, and it uses information that WMATA makes publicly available. Features include:
+This project contains the source code to create your own customizable Washington Metropolitan Area Transit Authority (WMATA) Metro information board, showing both Metrorail and Metrobus information. It is written using CircuitPython targeting the [Adafruit Matrix Portal S3](https://www.adafruit.com/product/5778) and 64x32 RGB LED matrices, and it uses information that WMATA makes publicly available. Features include:
 - Multiple options for displaying train and bus arrival predictions
 - The ability to auto-rotate through multiple "screens," including multiple arrival prediction screens
 - The ability to prioritize/filter the display of trains and buses that are predicted to arrive at a station or stop only after you can get there
