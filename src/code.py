@@ -266,7 +266,7 @@ while True:
 
         # Phase: trains — emit one screen at a time
         if conductor_phase == 'trains':
-            if train_cursor < len(train_screens):
+            while train_cursor < len(train_screens) and not pending_items:
                 stat = train_screens[train_cursor]
                 train_cursor += 1
                 if stat.get('station_code', ''):
@@ -275,7 +275,7 @@ while True:
                         'station_code': stat.get('station_code', 'A01'),
                         'config_details': stat
                     })
-            else:
+            if train_cursor >= len(train_screens) and not pending_items:
                 train_cursor = 0
                 conductor_phase = 'buses'
 
@@ -283,7 +283,7 @@ while True:
         if conductor_phase == 'buses':
             bus_screens = config.get('bus_arrival_screens', [])
 
-            if bus_cursor < len(bus_screens):
+            while bus_cursor < len(bus_screens) and not pending_items:
                 stop_cfg = bus_screens[bus_cursor]
                 bus_cursor += 1
                 stop_id = stop_cfg.get('stop_id', '')
@@ -358,7 +358,7 @@ while True:
                     if pending_items:
                         print(f"Queued items: {len(pending_items)}")
 
-            else:
+            if bus_cursor >= len(bus_screens) and not pending_items:
                 bus_cursor = 0
                 conductor_phase = 'rail_alerts'
 
@@ -497,13 +497,15 @@ while True:
 
             # If neither phase queued anything, start the next train cycle immediately
             if not pending_items and train_screens:
-                stat = train_screens[0]
-                pending_items.append({
-                    'type': 'train',
-                    'station_code': stat.get('station_code', 'A01'),
-                    'config_details': stat
-                })
-                train_cursor = 1
+                for i, stat in enumerate(train_screens):
+                    if stat.get('station_code', ''):
+                        pending_items.append({
+                            'type': 'train',
+                            'station_code': stat.get('station_code', 'A01'),
+                            'config_details': stat
+                        })
+                        train_cursor = i + 1
+                        break
 
     if need_next_item:
         if pending_items:
