@@ -35,7 +35,7 @@ config = {
             'lines': ['C61', 'D80',],
             'transit_time': 0,
             'bus_header': True,
-            'bus_display_mode': 2,
+            'bus_display_mode': 1,
             'alt_bus_header1': '',
             'alt_bus_header2': '',
         },
