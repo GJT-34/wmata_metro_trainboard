@@ -160,7 +160,7 @@ class MetroApi:
 
     def _process_train_data(self, json_data, station_cfg):
         target_lines = station_cfg.get('lines', [])
-        target_groups = [str(g) for g in station_cfg.get('groups', [1, 2, 3])]
+        target_groups = [str(g) for g in station_cfg.get('groups', [])]
         transit_time = int(station_cfg.get('transit_time', 0))
         
         trains = json_data.get('Trains', [])
@@ -172,7 +172,7 @@ class MetroApi:
             line = t.get('Line')
             group = str(t.get('Group'))
             
-            if (not target_lines or line in target_lines) and group in target_groups:
+            if (not target_lines or line in target_lines) and (not target_groups or group in target_groups):
                 m_raw = t.get('Min', '--')
                 
                 # Numeric value for sorting and pruning
