@@ -1,7 +1,7 @@
 import time
 time.sleep(2) # Give the hardware and USB serial a moment to settle
 import displayio 
-displayio.release_displays() # Release displays to prevent Errno 5
+displayio.release_displays() # Release displays to help prevent Errno 5
 import board
 from digitalio import DigitalInOut, Direction, Pull
 import gc
@@ -12,11 +12,14 @@ from adafruit_matrixportal.matrix import Matrix
 from adafruit_bitmap_font import bitmap_font
 from adafruit_display_text.label import Label
 import wifi
+import supervisor
+supervisor.runtime.autoreload = False
 
 from config import config
-from metro_api import MetroApi
+from api_access import MetroApi
 from train_board import TrainBoard
 from alert_board import AlertBoard
+from bus_board import BusBoard
 from utils import report_memory, log_screen, safe_refresh, wrap_text_pixel_perfect, STATIONS_FOR_OUTAGES
 
 gc.collect()
@@ -30,8 +33,10 @@ display.auto_refresh = False
 matrix_group = displayio.Group() # trains/alerts: in super_group
 trains_subgroup = displayio.Group() # train arrival data: in matrix_group
 alerts_subgroup = displayio.Group() # alerts data: in matrix_group
+buses_subgroup = displayio.Group() # bus arrival data: in matrix_group
 matrix_group.append(trains_subgroup)
 matrix_group.append(alerts_subgroup)
+matrix_group.append(buses_subgroup)
 indicator_group = displayio.Group() # button press indicators: in super_group
 super_group = displayio.Group() # the root container
 super_group.append(matrix_group)
@@ -123,6 +128,7 @@ gc.collect()
 api = MetroApi()
 train_board = TrainBoard(trains_subgroup, shared_font)
 alert_board = AlertBoard(alerts_subgroup, shared_font)
+bus_board = BusBoard(buses_subgroup, shared_font, config)
 start_secs = time.monotonic() 
 current_idx = 0
 is_rotating = config.get('start_in_rotating_mode', True)
@@ -199,21 +205,21 @@ def check_buttons():
             
             state_label = "ON" if new_state else "OFF"
             print(f"[{time.monotonic() - start_secs:.1f}s] ELEVATOR OUTAGES: {state_label}")
-            
-            return "STATE_CHANGE_ALERTS" # Force a rotation rebuild
-            
+
+            return "JUMP_ELEVATOR_OUTAGES" if new_state else "STATE_CHANGE_ALERTS"
+
         else:
             # LONG PRESS: Toggle Detailed Rail Alerts (True/False)
             show_rail_alerts = not show_rail_alerts
             new_state = show_rail_alerts
-            
+
             # Visual Feedback: 1 blink for OFF, 2 blinks for ON (color 3)
             blinks = 2 if new_state else 1
             blink_indicator_pixels(3, blinks, short_blink)
-            
+
             state_label = "ON" if new_state else "OFF"
             print(f"[{time.monotonic() - start_secs:.1f}s] DETAILED ALERTS: {state_label}")
-            return "STATE_CHANGE_ALERTS" # Force a rotation rebuild
+            return "JUMP_RAIL_ALERTS" if new_state else "STATE_CHANGE_ALERTS"
 
 
     return None
@@ -223,71 +229,157 @@ report_memory()
 
 # --- 5. Main Loop ---
 
-active_rotation = []
+pending_items = []
+train_cursor = 0
+bus_cursor = 0
+conductor_phase = 'trains'
+active_item = None
+need_next_item = True
 last_rail_status_display_time = -config.get('rail_status_display_frequency', 60)
 last_rail_alert_display_time = -config.get('rail_alert_display_frequency', 60)
 last_elevator_outages_display_time = -config.get('elevator_outage_display_frequency', 60)
 last_rotation_time = time.monotonic()
-is_repeated_screen = False
 loading_label.hidden = True
 trains_subgroup.hidden = True
 alerts_subgroup.hidden = True
+buses_subgroup.hidden = True
 safe_refresh(display)
 intermission = config.get('metro_api_fetch_intermission', 30)
 last_fetch_time_alerts = -100
 last_fetch_time_elevators = -100
 last_fetch_time_trains = {}
+last_fetch_time_buses = {}
 rail_alerts = []
 elevator_outages = []
 train_predictions_cache = {}
+bus_predictions_cache = {}
 
 # Terminology: "line" means train line, not a line of pixels or a line of text
- 
+
 while True:
-    gc.collect() 
+    gc.collect()
     now = time.monotonic()
 
-    # We rebuild screenlist on first pass & after each screen rotation cycle
-    if current_idx == 0:
+    # --- 1. THE CONDUCTOR (JIT: determines the next screen when needed) ---
+    if need_next_item and not pending_items:
+        train_screens = config.get('train_arrival_screens', [])
 
-        # 1. THE CONDUCTOR (DETERMINES HOW MANY & WHICH SCREENS TO INCLUDE)
-        # We rebuild if:
-        # A) It's the very first run (active_rotation is empty)
-        # B) We are back at the start, unless we are stationary and repeating the same screen
+        # Phase: trains — emit one screen at a time
+        if conductor_phase == 'trains':
+            if train_cursor < len(train_screens):
+                stat = train_screens[train_cursor]
+                train_cursor += 1
+                if stat.get('station_code', ''):
+                    pending_items.append({
+                        'type': 'train',
+                        'station_code': stat.get('station_code', 'A01'),
+                        'config_details': stat
+                    })
+            else:
+                train_cursor = 0
+                conductor_phase = 'buses'
 
-        should_rebuild = not active_rotation or not is_repeated_screen
+        # Phase: buses — fetch and queue bus arrival pages
+        if conductor_phase == 'buses':
+            bus_screens = config.get('bus_arrival_screens', [])
 
-        if should_rebuild:
-            new_rotation = []
+            if bus_cursor < len(bus_screens):
+                stop_cfg = bus_screens[bus_cursor]
+                bus_cursor += 1
+                stop_id = stop_cfg.get('stop_id', '')
+                if stop_id:
+                    filter_lines = stop_cfg.get('lines', [])
+                    transit_time = int(stop_cfg.get('transit_time', 0))
 
-            # --- TRAIN PLACEHOLDERS ---
-            for stat in config.get('train_arrival_screens', []):
-                new_rotation.append({
-                    'type': 'train',
-                    'station_code': stat.get('station_code', 'A01'),
-                    'config_details': stat 
-                })
+                    if (now - last_fetch_time_buses.get(stop_id, -100)) >= intermission:
+                        try:
+                            raw = api.fetch_bus_predictions(requests, stop_id)
+                            bus_predictions_cache[stop_id] = raw
+                            last_fetch_time_buses[stop_id] = now
+                            print(f"[{time.monotonic() - start_secs:.1f}s] Fresh Fetch: {stop_id}")
+                        except Exception as e:
+                            print(f"[{time.monotonic() - start_secs:.1f}s] [ERROR] Bus Fetch: {e}")
+                            if stop_id not in bus_predictions_cache:
+                                bus_predictions_cache[stop_id] = {}
+                    raw = bus_predictions_cache.get(stop_id, {})
+                    gc.collect()
 
-            # --- RAIL STATUS & DETAILED RAIL ALERTS ---
+                    route_pages = []
+                    for route_id, rdata in raw.items():
+                        if filter_lines and route_id not in filter_lines:
+                            continue
+                        times = [t for t in rdata['times'] if t >= transit_time]
+                        if not times:
+                            continue
+                        dtxt = rdata['direction_text']
+                        _dir = dtxt.split()[0] if dtxt else '??'
+                        direction = {'East': 'EB', 'West': 'WB', 'North': 'NB', 'South': 'SB'}.get(_dir, _dir)
+                        route_pages.append({
+                            'route_id': route_id,
+                            'direction': direction,
+                            'times': times[:3],
+                        })
+
+                    show_header = stop_cfg.get('bus_header', True)
+                    display_mode = stop_cfg.get('bus_display_mode', 2)
+
+                    if display_mode == 1:
+                        flat = []
+                        for r in route_pages:
+                            for t in r['times']:
+                                flat.append({'route_id': r['route_id'], 'direction': r['direction'], 'time': t})
+                        flat.sort(key=lambda x: x['time'])
+                        pending_items.append({
+                            'type': 'bus', 'display_mode': 1,
+                            'show_header': show_header,
+                            'config_details': stop_cfg, 'arrivals': flat[:4]
+                        })
+                    elif show_header:
+                        # One route per page, header on every page
+                        if route_pages:
+                            for r in route_pages:
+                                pending_items.append({
+                                    'type': 'bus', 'show_header': True,
+                                    'config_details': stop_cfg, 'routes': [r]
+                                })
+                        else:
+                            pending_items.append({
+                                'type': 'bus', 'show_header': True,
+                                'config_details': stop_cfg, 'routes': []
+                            })
+                    else:
+                        # Two routes per page, no header
+                        for i in range(0, len(route_pages), 2):
+                            pending_items.append({
+                                'type': 'bus', 'show_header': False,
+                                'config_details': stop_cfg, 'routes': route_pages[i:i+2]
+                            })
+
+                    if pending_items:
+                        print(f"Queued items: {len(pending_items)}")
+
+            else:
+                bus_cursor = 0
+                conductor_phase = 'rail_alerts'
+
+        # Phase: rail_alerts — fetch and queue rail status + detailed alerts
+        if conductor_phase == 'rail_alerts':
             status_interval = config.get('rail_status_display_frequency', 120)
             alert_interval = config.get('rail_alert_display_frequency', 600)
 
             time_since_status = now - last_rail_status_display_time
             time_since_alerts = now - last_rail_alert_display_time
 
-            # We fetch data if either "card" is due to be added to the playlist
             due_for_status = status_interval >= 0 and (status_interval == 0 or time_since_status >= status_interval)
             due_for_alerts = show_rail_alerts and (alert_interval == 0 or time_since_alerts >= alert_interval)
 
             if due_for_status or due_for_alerts:
                 try:
-
-                    # Check if the pantry data is stale
                     if (now - last_fetch_time_alerts) >= intermission:
                         rail_alerts = api.fetch_rail_alerts(requests) or []
-                        last_fetch_time_alerts = now  # Record the specific fetch time
+                        last_fetch_time_alerts = now
                         print(f"[{time.monotonic() - start_secs:.1f}s] Fresh Fetch: Rail Alerts")
-   
+
                     # --- RAIL STATUS ---
                     if due_for_status:
                         all_lines = ["RD", "YL", "GR", "OR", "SV", "BL"]
@@ -299,10 +391,7 @@ while True:
                                     affected_lines.append(l)
                         unaffected_lines = [l for l in all_lines if l not in affected_lines]
 
-                        if config.get('show_splash'):
-                            new_rotation.append({'type': 'splash', 'header': "METRORAIL\nSTATUS"})
-                        
-                        new_rotation.append({
+                        pending_items.append({
                             'type': 'rail_status',
                             'unaffected_lines_list': unaffected_lines,
                             'affected_lines_list': affected_lines
@@ -317,52 +406,45 @@ while True:
                         for inc in rail_alerts:
                             lines_str = inc.get('LinesAffected', 'All').rstrip(';')
                             affected_lines_list = [l.strip() for l in lines_str.split(';') if l.strip()]
-                            
-                            # 1. Filter by line
+
                             if not target_lines or any(line in affected_lines_list for line in target_lines):
                                 desc = inc.get('Description', '').strip()
-                                if not desc: 
+                                if not desc:
                                     continue
 
-                                # 2. DEFINE all_wrapped HERE so it is always available
                                 if not use_fancy:
                                     clean_lines = lines_str.rstrip('; ').replace(';', ',')
                                     full_text = f"{clean_lines}: {desc}"
-                                    all_wrapped = wrap_text_pixel_perfect(full_text, 64, shared_font)
+                                    all_wrapped = wrap_text_pixel_perfect(full_text, 65, shared_font)
                                 else:
-                                    all_wrapped = wrap_text_pixel_perfect(desc, 64, shared_font)
+                                    all_wrapped = wrap_text_pixel_perfect(desc, 65, shared_font)
 
-                                # 3. SAFETY CHECK: If wrapping failed, move to next alert
                                 if not all_wrapped:
                                     print("Wrap_text_pixel_perfect returned nothing")
                                     continue
 
-                                # 4. Add Splash
                                 if config.get('show_splash') and not alert_pages_added:
-                                    new_rotation.append({'type': 'splash', 'header': "METRORAIL\nALERTS"})
+                                    pending_items.append({'type': 'splash', 'header': "METRORAIL\nALERTS"})
                                     alert_pages_added = True
 
-                                # 5. Add Detail Cards
                                 if not use_fancy:
                                     for i in range(0, len(all_wrapped), 4):
-                                        new_rotation.append({
+                                        pending_items.append({
                                             'type': 'rail_alert',
                                             'lines_affected': lines_str,
                                             'body_lines': "\n".join(all_wrapped[i:i+4]),
                                             'page_index': i // 4
                                         })
                                 else:
-                                    # Page 1 (Top row reserved for fancy boxes)
-                                    new_rotation.append({
+                                    pending_items.append({
                                         'type': 'rail_alert',
                                         'lines_affected': lines_str,
                                         'body_lines': "\n".join(all_wrapped[:3]),
                                         'page_index': 0
                                     })
-                                    # Pages 2+
                                     remaining = all_wrapped[3:]
                                     for i in range(0, len(remaining), 4):
-                                        new_rotation.append({
+                                        pending_items.append({
                                             'type': 'rail_alert',
                                             'lines_affected': lines_str,
                                             'body_lines': "\n".join(remaining[i:i+4]),
@@ -372,59 +454,73 @@ while True:
                 except Exception as e:
                     print(f"[{time.monotonic() - start_secs:.1f}s] [ERROR] Rail Logic: {e}")
 
-            # --- ELEVATOR OUTAGES ---
+            if pending_items:
+                print(f"Queued items: {len(pending_items)}")
+            conductor_phase = 'elevator_outages'
+
+        # Phase: elevator_outages — only runs when rail_alerts queued nothing
+        if conductor_phase == 'elevator_outages' and not pending_items:
             elevator_outage_interval = config.get('elevator_outage_display_frequency', 1200)
             time_since_last_elevator_outage = now - last_elevator_outages_display_time
             if show_elevator_outages and (elevator_outage_interval == 0 or time_since_last_elevator_outage >= elevator_outage_interval):
                 try:
-                    # elevator_outages is a list of station codes with outages
-                    # Separate timer check for elevators
                     if (now - last_fetch_time_elevators) >= intermission:
                         elevator_outages = api.fetch_elevator_outages(requests) or []
-                        last_fetch_time_elevators = now  # Record the specific fetch time
+                        last_fetch_time_elevators = now
                         print(f"[{time.monotonic() - start_secs:.1f}s] Fresh Fetch: Elevator Outages")
 
                     if elevator_outages:
                         outage_counts = {}
                         for code in elevator_outages:
-                            # Check if this station code is one we care about mapping
                             if code in STATIONS_FOR_OUTAGES:
                                 name = STATIONS_FOR_OUTAGES[code]
                                 outage_counts[name] = outage_counts.get(name, 0) + 1
 
                         if outage_counts:
-                            # 1. Generate the full sentence here so we can measure it
-                            full_sentence = alert_board.build_elevator_string(outage_counts) # Helper below
-                            wrapped = wrap_text_pixel_perfect(full_sentence, 64, shared_font)
-                            
-                            if config.get('show_splash'):
-                                new_rotation.append({'type': 'splash', 'header': "ELEVATOR\nOUTAGES", 'color': 0xFF6600})
+                            full_sentence = alert_board.build_elevator_string(outage_counts)
+                            wrapped = wrap_text_pixel_perfect(full_sentence, 65, shared_font)
 
-                            # 2. Add one rotation item PER 4 lines of text
+                            if config.get('show_splash'):
+                                pending_items.append({'type': 'splash', 'header': "ELEVATOR\nOUTAGES", 'color': 0xFF6600})
+
                             for i in range(0, len(wrapped), 4):
-                                new_rotation.append({
+                                pending_items.append({
                                     'type': 'elevator_outage',
                                     'body_lines': "\n".join(wrapped[i:i+4]),
                                     'page_index': i // 4
                                 })
-                except Exception as e:  
+                            print(f"Queued items: {len(pending_items)}")
+                except Exception as e:
                     print(f"[{time.monotonic() - start_secs:.1f}s] [ERROR] Elevator Logic: {e}")
 
-            active_rotation = new_rotation
-            print(f"Playlist updated. Items: {len(active_rotation)}")
+            conductor_phase = 'trains'
+
+            # If neither phase queued anything, start the next train cycle immediately
+            if not pending_items and train_screens:
+                stat = train_screens[0]
+                pending_items.append({
+                    'type': 'train',
+                    'station_code': stat.get('station_code', 'A01'),
+                    'config_details': stat
+                })
+                train_cursor = 1
+
+    if need_next_item:
+        if pending_items:
+            active_item = pending_items.pop(0)
+        need_next_item = False
 
     # --- 2. THE PERFORMER (HANDLES UI EXECUTION LOGIC)
-    if not active_rotation:
-        print("Waiting for Conductor to build rotation...")
+    if active_item is None:
         time.sleep(1)
-        continue 
-
-    active_item = active_rotation[current_idx]
+        need_next_item = True
+        continue
 
     try:
         if active_item['type'] == 'train':
             trains_subgroup.hidden = False
             alerts_subgroup.hidden = True
+            buses_subgroup.hidden = True
 
             target_cfg = active_item.get('config_details')
             s_code = active_item.get('station_code')
@@ -449,9 +545,19 @@ while True:
             train_board.refresh(target_cfg, train_data)
             log_screen(start_secs, is_rotating, target_cfg)
 
+        elif active_item['type'] == 'bus':
+            trains_subgroup.hidden = True
+            alerts_subgroup.hidden = True
+            buses_subgroup.hidden = False
+            bus_board.refresh(active_item)
+            route_ids = [r.get('route_id', '??') for r in active_item.get('routes', [])]
+            log_screen(start_secs, is_rotating,
+                       {'station_code': 'BUS', 'lines': route_ids, 'groups': []})
+
         elif active_item['type'] in ['splash', 'rail_status', 'rail_alert', 'elevator_outage']:
             trains_subgroup.hidden = True
             alerts_subgroup.hidden = False
+            buses_subgroup.hidden = True
             
             # 1. Determine the Mode and Color
             a_type = active_item['type']
@@ -486,12 +592,19 @@ while True:
                 alert_board.update('elevator_outage', active_item.get('body_lines', ''))
 
             # 3. Logging
-            log_header = active_item.get('header', 'ALERT').replace('\n', ' ')
-            log_screen(start_secs, is_rotating, {
-                'station_code': 'STATUS', 
-                'lines': [log_header],
-                'groups': [] 
-            })
+            if a_type == 'splash':
+                log_name = 'SPLASH'
+                log_lines = [active_item.get('header', '').replace('\n', ' ')]
+            elif a_type == 'rail_status':
+                log_name = 'STATUS'
+                log_lines = []
+            elif a_type == 'rail_alert':
+                log_name = 'ALERT(S)'
+                log_lines = []
+            else:
+                log_name = 'ELEVATOR OUTAGE(S)'
+                log_lines = []
+            log_screen(start_secs, is_rotating, {'station_code': log_name, 'lines': log_lines, 'groups': []})
 
     except Exception as e:
         print(f"[{time.monotonic() - start_secs:.1f}s] [ERROR] Loop execution: {e}")
@@ -521,26 +634,46 @@ while True:
             break
         time.sleep(0.05)
 
-    # Check for Alert Mode Changes (Immediate Rebuild + Jump to Start)
-    if btn_result == "STATE_CHANGE_ALERTS":
-        current_idx = 0
+    # Check for Alert Mode Changes
+    if btn_result == "JUMP_RAIL_ALERTS":
+        pending_items = []
+        train_cursor = 0
+        bus_cursor = 0
+        conductor_phase = 'rail_alerts'
+        last_rail_alert_display_time = 0
+        last_rail_status_display_time = 0
+        need_next_item = True
+        print(f"[{time.monotonic() - start_secs:.1f}s] Jumping to Rail Alerts.")
+
+    elif btn_result == "JUMP_ELEVATOR_OUTAGES":
+        pending_items = []
+        train_cursor = 0
+        bus_cursor = 0
+        conductor_phase = 'elevator_outages'
+        last_elevator_outages_display_time = 0
+        need_next_item = True
+        print(f"[{time.monotonic() - start_secs:.1f}s] Jumping to Elevator Outages.")
+
+    elif btn_result == "STATE_CHANGE_ALERTS":
+        pending_items = []
+        train_cursor = 0
+        bus_cursor = 0
+        conductor_phase = 'trains'
         last_rail_alert_display_time = 0
         last_rail_status_display_time = 0
         last_elevator_outages_display_time = 0
-        is_repeated_screen = False 
+        need_next_item = True
         print(f"[{time.monotonic() - start_secs:.1f}s] Alert Mode Changed: Resetting to Start.")
 
-    # Check for Rotation Toggles (Rebuild but stay on current screen)
+    # Check for Rotation Toggles (stay on current screen)
     elif btn_result == "STATE_CHANGE_ROTATION":
-        is_repeated_screen = False
         print(f"[{time.monotonic() - start_secs:.1f}s] Rotation Toggled: is_rotating={is_rotating}")
 
     # Handle Manual Advance or Automatic Rotation
     else:
-        should_increment = (is_rotating and not btn_result) or (btn_result == "MOVE_NEXT")
+        should_advance = (is_rotating and not btn_result) or (btn_result == "MOVE_NEXT")
 
-        if should_increment:
-            # Match these names EXACTLY to what the Conductor uses at the top
+        if should_advance:
             p_type = active_item.get('type')
             if p_type == 'rail_status':
                 last_rail_status_display_time = time.monotonic()
@@ -549,9 +682,6 @@ while True:
             elif p_type == 'elevator_outage':
                 last_elevator_outages_display_time = time.monotonic()
 
-            current_idx = (current_idx + 1) % len(active_rotation)
-            is_repeated_screen = False
+            need_next_item = True
             last_rotation_time = time.monotonic()
-        else:
-            # If we were already sitting here and time ran out, it's a repeat
-            is_repeated_screen = not btn_result 
+        # else: paused — active_item persists, need_next_item stays False

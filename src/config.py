@@ -13,8 +13,8 @@ config = {
             'station_code': 'K01',
             'lines': ['OR', 'SV',],
             'groups': [1,],           
-            'transit_time': 8,
-            'first_columns': 1,
+            'transit_time': 0,
+            'train_display_mode': 1,
             'train_header': True,
             'alt_train_header': '',
         },
@@ -22,10 +22,22 @@ config = {
             'station_code': 'K01',
             'lines': ['OR', 'SV',],
             'groups': [2,],           
-            'transit_time': 8,
-            'first_columns': 1,
+            'transit_time': 0,
+            'train_display_mode': 1,
             'train_header': True,
             'alt_train_header': '',
+        },
+    ],
+
+    'bus_arrival_screens': [
+        {
+            'stop_id': '1002290',
+            'lines': ['C61', 'D80',],
+            'transit_time': 0,
+            'bus_header': True,
+            'bus_display_mode': 2,
+            'alt_bus_header1': '',
+            'alt_bus_header2': '',
         },
     ],
 
@@ -33,25 +45,23 @@ config = {
     'rail_status_display_frequency': 120,
     'rail_alert_display_frequency': 600,
     'rail_alert_lines': [],
-    'elevator_outage_display_frequency': 1200,
+    'elevator_outage_display_frequency': -1,
 
     ########################################
     # Settings You Are Less likely to Adjust
     ########################################
     
     # Wifi & API Settings
-
     'wifi_max_attempts': 5,
     'metro_api_fetch_intermission': 20,
     'metro_api_retries': 3,
 
     # UI Behavior
-
     'start_in_rotating_mode': True,
     'general_rotation_speed': 8,
     'alerts_rotation_speed': 5,
     'show_splash': True,
-    'splash_rotation_speed': 2,
+    'splash_rotation_speed': 3,
     'dest_max_characters': 8,
 
     # Visual Styling & Colors

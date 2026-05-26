@@ -2,7 +2,7 @@ import displayio
 from adafruit_display_text.label import Label
 from config import config
 
-# first_columns modes:
+# train_display_mode values:
 # 1 - Colored arrow + car length
 # 2 - Two-letter train line abbreviation
 # 3 - First letter of train line + colored arrow
@@ -12,25 +12,29 @@ class TrainBoard:
         self.parent_group = parent_group
         self.font = font
         self.trains = []
-        self.current_station_code = None 
+        self.current_station_code = None
         self.current_cols = None
         self.current_head = None
+        self.current_alt = None
         self.header_label = None
 
     def refresh(self, station_cfg, train_predictions):
         new_code = station_cfg.get('station_code')
-        new_cols = station_cfg.get('first_columns', 1)
+        new_cols = station_cfg.get('train_display_mode', 1)
         new_head = station_cfg.get('train_header', True)
+        new_alt = station_cfg.get('alt_train_header', '')
 
         # 1. Configuration Change Detection
         if (new_code != self.current_station_code or
             new_cols != self.current_cols or
-            new_head != self.current_head):
+            new_head != self.current_head or
+            new_alt != self.current_alt):
 
             self._build_layout(station_cfg)
             self.current_station_code = new_code
             self.current_cols = new_cols
             self.current_head = new_head
+            self.current_alt = new_alt
 
         # 2. Dynamic Header Update
         if self.header_label and new_head:
@@ -61,7 +65,7 @@ class TrainBoard:
         self.trains = [] 
         header_type = station_cfg.get('train_header', True)
         alt_title = station_cfg.get('alt_train_header', '')
-        first_cols = station_cfg.get('first_columns', 3)
+        first_cols = station_cfg.get('train_display_mode', 3)
         row_height = 8
         current_y = 0
 

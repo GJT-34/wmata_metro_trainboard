@@ -238,11 +238,16 @@ def safe_refresh(display_obj):
 def log_screen(start_secs, is_rotating, active_station):
     """Formats and prints current screen information to the serial console."""
     name = active_station.get('station_code', 'A01')
-    lines = ", ".join(active_station.get('lines', ['??']))
-    groups = ", ".join(str(g) for g in active_station.get('groups', ['?']))
+    lines = ", ".join(active_station.get('lines', []))
+    groups = ", ".join(str(g) for g in active_station.get('groups', []))
     status = "[ROTATING]" if is_rotating else "[STATIONARY]"
-    
-    print(f"[{time.monotonic() - start_secs:.1f}s] {status} {name} ({lines}) (track(s) {groups})")
+
+    parts = [f"[{time.monotonic() - start_secs:.1f}s]", status, name]
+    if lines:
+        parts.append(f"({lines})")
+    if groups:
+        parts.append(f"(track(s) {groups})")
+    print(" ".join(parts))
 
 def report_memory():
     """Reports total used RAM and the percentage of the total heap consumed."""
@@ -282,7 +287,7 @@ def wrap_text_pixel_perfect(text, max_width, font, first_row_offset=0):
         # If it's the first row, we subtract the offset from the max_width
         current_limit = max_width - first_row_offset if is_first_row else max_width
         
-        if calculate_string_width(test_row, font) <= current_limit:
+        if calculate_string_width(test_row.rstrip(), font) <= current_limit:
             current_row = test_row
         else:
             if current_row:
